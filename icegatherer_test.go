@@ -3,11 +3,13 @@
 package webrtc
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/pion/logging"
 	"github.com/pion/transport/test"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewICEGatherer_Success(t *testing.T) {
@@ -22,7 +24,7 @@ func TestNewICEGatherer_Success(t *testing.T) {
 		ICEServers: []ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
 	}
 
-	gatherer, err := NewICEGatherer(0, 0, nil, nil, nil, nil, nil, nil, nil, logging.NewDefaultLoggerFactory(), false, false, nil, opts)
+	gatherer, err := NewAPI().NewICEGatherer(opts)
 	if err != nil {
 		t.Error(err)
 	}
@@ -55,10 +57,7 @@ func TestNewICEGatherer_Success(t *testing.T) {
 		t.Fatalf("No candidates gathered")
 	}
 
-	err = gatherer.Close()
-	if err != nil {
-		t.Error(err)
-	}
+	assert.NoError(t, gatherer.Close())
 }
 
 func TestICEGather_LocalCandidateOrder(t *testing.T) {
@@ -66,12 +65,14 @@ func TestICEGather_LocalCandidateOrder(t *testing.T) {
 	lim := test.TimeOut(time.Second * 20)
 	defer lim.Stop()
 
+	report := test.CheckRoutines(t)
+	defer report()
+
 	opts := ICEGatherOptions{
 		ICEServers: []ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
 	}
 
-	to := time.Second
-	gatherer, err := NewICEGatherer(10000, 10010, &to, &to, &to, &to, &to, &to, &to, logging.NewDefaultLoggerFactory(), false, false, []NetworkType{NetworkTypeUDP4}, opts)
+	gatherer, err := NewAPI().NewICEGatherer(opts)
 	if err != nil {
 		t.Error(err)
 	}
@@ -110,7 +111,36 @@ func TestICEGather_LocalCandidateOrder(t *testing.T) {
 		}
 	}
 
-	if err := gatherer.Close(); err != nil {
+	assert.NoError(t, gatherer.Close())
+}
+
+func TestICEGather_mDNSCandidateGathering(t *testing.T) {
+	// Limit runtime in case of deadlocks
+	lim := test.TimeOut(time.Second * 20)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	s := SettingEngine{}
+	s.GenerateMulticastDNSCandidates(true)
+
+	gatherer, err := NewAPI(WithSettingEngine(s)).NewICEGatherer(ICEGatherOptions{})
+	if err != nil {
 		t.Error(err)
 	}
+
+	gotMulticastDNSCandidate, resolveFunc := context.WithCancel(context.Background())
+	gatherer.OnLocalCandidate(func(c *ICECandidate) {
+		if c != nil && strings.HasSuffix(c.Address, ".local") {
+			resolveFunc()
+		}
+	})
+
+	if err := gatherer.SignalCandidates(); err != nil {
+		t.Error(err)
+	}
+
+	<-gotMulticastDNSCandidate.Done()
+	assert.NoError(t, gatherer.Close())
 }

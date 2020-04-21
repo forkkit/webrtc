@@ -3,6 +3,7 @@
 package webrtc
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"math/big"
 	"reflect"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,13 +24,13 @@ import (
 
 // newPair creates two new peer connections (an offerer and an answerer) using
 // the api.
-func (api *API) newPair() (pcOffer *PeerConnection, pcAnswer *PeerConnection, err error) {
-	pca, err := api.NewPeerConnection(Configuration{})
+func (api *API) newPair(cfg Configuration) (pcOffer *PeerConnection, pcAnswer *PeerConnection, err error) {
+	pca, err := api.NewPeerConnection(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	pcb, err := api.NewPeerConnection(Configuration{})
+	pcb, err := api.NewPeerConnection(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -37,6 +39,9 @@ func (api *API) newPair() (pcOffer *PeerConnection, pcAnswer *PeerConnection, er
 }
 
 func TestNew_Go(t *testing.T) {
+	report := test.CheckRoutines(t)
+	defer report()
+
 	api := NewAPI()
 	t.Run("Success", func(t *testing.T) {
 		secretKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -69,6 +74,7 @@ func TestNew_Go(t *testing.T) {
 		})
 		assert.Nil(t, err)
 		assert.NotNil(t, pc)
+		assert.NoError(t, pc.Close())
 	})
 	t.Run("Failure", func(t *testing.T) {
 		testCases := []struct {
@@ -103,14 +109,17 @@ func TestNew_Go(t *testing.T) {
 						},
 					},
 				})
-			}, &rtcerr.InvalidAccessError{Err: ErrNoTurnCredencials}},
+			}, &rtcerr.InvalidAccessError{Err: ErrNoTurnCredentials}},
 		}
 
 		for i, testCase := range testCases {
-			_, err := testCase.initialize()
+			pc, err := testCase.initialize()
 			assert.EqualError(t, err, testCase.expectedErr.Error(),
 				"testCase: %d %v", i, testCase,
 			)
+			if pc != nil {
+				assert.NoError(t, pc.Close())
+			}
 		}
 	})
 }
@@ -119,6 +128,8 @@ func TestPeerConnection_SetConfiguration_Go(t *testing.T) {
 	// Note: this test includes all SetConfiguration features that are supported
 	// by Go but not the WASM bindings, namely: ICEServer.Credential,
 	// ICEServer.CredentialType, and Certificates.
+	report := test.CheckRoutines(t)
+	defer report()
 
 	api := NewAPI()
 
@@ -219,7 +230,7 @@ func TestPeerConnection_SetConfiguration_Go(t *testing.T) {
 					},
 				},
 			},
-			wantErr: &rtcerr.InvalidAccessError{Err: ErrNoTurnCredencials},
+			wantErr: &rtcerr.InvalidAccessError{Err: ErrNoTurnCredentials},
 		},
 	} {
 		pc, err := test.init()
@@ -231,21 +242,18 @@ func TestPeerConnection_SetConfiguration_Go(t *testing.T) {
 		if got, want := err, test.wantErr; !reflect.DeepEqual(got, want) {
 			t.Errorf("SetConfiguration %q: err = %v, want %v", test.name, got, want)
 		}
+
+		assert.NoError(t, pc.Close())
 	}
 }
 
-// TODO - This unittest needs to be completed when CreateDataChannel is complete
-// func TestPeerConnection_CreateDataChannel(t *testing.T) {
-// 	pc, err := New(Configuration{})
-// 	assert.Nil(t, err)
-//
-// 	_, err = pc.CreateDataChannel("data", &DataChannelInit{
-//
-// 	})
-// 	assert.Nil(t, err)
-// }
-
 func TestPeerConnection_EventHandlers_Go(t *testing.T) {
+	lim := test.TimeOut(time.Second * 5)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
 	// Note: When testing the Go event handlers we peer into the state a bit more
 	// than what is possible for the environment agnostic (Go or WASM/JavaScript)
 	// EventHandlers test.
@@ -253,24 +261,29 @@ func TestPeerConnection_EventHandlers_Go(t *testing.T) {
 	pc, err := api.NewPeerConnection(Configuration{})
 	assert.Nil(t, err)
 
-	onTrackCalled := make(chan bool)
-	onICEConnectionStateChangeCalled := make(chan bool)
-	onDataChannelCalled := make(chan bool)
+	onTrackCalled := make(chan struct{})
+	onICEConnectionStateChangeCalled := make(chan struct{})
+	onDataChannelCalled := make(chan struct{})
 
 	// Verify that the noop case works
 	assert.NotPanics(t, func() { pc.onTrack(nil, nil) })
 	assert.NotPanics(t, func() { pc.onICEConnectionStateChange(ice.ConnectionStateNew) })
 
 	pc.OnTrack(func(t *Track, r *RTPReceiver) {
-		onTrackCalled <- true
+		close(onTrackCalled)
 	})
 
 	pc.OnICEConnectionStateChange(func(cs ICEConnectionState) {
-		onICEConnectionStateChangeCalled <- true
+		close(onICEConnectionStateChangeCalled)
 	})
 
 	pc.OnDataChannel(func(dc *DataChannel) {
-		onDataChannelCalled <- true
+		// Questions:
+		//  (1) How come this callback is made with dc being nil?
+		//  (2) How come this callback is made without CreateDataChannel?
+		if dc != nil {
+			close(onDataChannelCalled)
+		}
 	})
 
 	// Verify that the handlers deal with nil inputs
@@ -282,20 +295,10 @@ func TestPeerConnection_EventHandlers_Go(t *testing.T) {
 	assert.NotPanics(t, func() { pc.onICEConnectionStateChange(ice.ConnectionStateNew) })
 	assert.NotPanics(t, func() { go pc.onDataChannelHandler(&DataChannel{api: api}) })
 
-	allTrue := func(vals []bool) bool {
-		for _, val := range vals {
-			if !val {
-				return false
-			}
-		}
-		return true
-	}
-
-	assert.True(t, allTrue([]bool{
-		<-onTrackCalled,
-		<-onICEConnectionStateChangeCalled,
-		<-onDataChannelCalled,
-	}))
+	<-onTrackCalled
+	<-onICEConnectionStateChangeCalled
+	<-onDataChannelCalled
+	assert.NoError(t, pc.Close())
 }
 
 // This test asserts that nothing deadlocks we try to shutdown when DTLS is in flight
@@ -304,8 +307,11 @@ func TestPeerConnection_ShutdownNoDTLS(t *testing.T) {
 	lim := test.TimeOut(time.Second * 10)
 	defer lim.Stop()
 
+	report := test.CheckRoutines(t)
+	defer report()
+
 	api := NewAPI()
-	offerPC, answerPC, err := api.newPair()
+	offerPC, answerPC, err := api.newPair(Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,14 +341,11 @@ func TestPeerConnection_ShutdownNoDTLS(t *testing.T) {
 	})
 
 	<-iceComplete
-	if err = offerPC.Close(); err != nil {
-		t.Fatal(err)
-	} else if err = answerPC.Close(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, offerPC.Close())
+	assert.NoError(t, answerPC.Close())
 }
 
-func TestPeerConnection_PeropertyGetters(t *testing.T) {
+func TestPeerConnection_PropertyGetters(t *testing.T) {
 	pc := &PeerConnection{
 		currentLocalDescription:  &SessionDescription{},
 		pendingLocalDescription:  &SessionDescription{},
@@ -363,6 +366,9 @@ func TestPeerConnection_PeropertyGetters(t *testing.T) {
 }
 
 func TestPeerConnection_AnswerWithoutOffer(t *testing.T) {
+	report := test.CheckRoutines(t)
+	defer report()
+
 	pc, err := NewPeerConnection(Configuration{})
 	if err != nil {
 		t.Errorf("New PeerConnection: got error: %v", err)
@@ -371,11 +377,16 @@ func TestPeerConnection_AnswerWithoutOffer(t *testing.T) {
 	if !reflect.DeepEqual(&rtcerr.InvalidStateError{Err: ErrNoRemoteDescription}, err) {
 		t.Errorf("CreateAnswer without RemoteDescription: got error: %v", err)
 	}
+
+	assert.NoError(t, pc.Close())
 }
 
 func TestPeerConnection_satisfyTypeAndDirection(t *testing.T) {
 	createTransceiver := func(kind RTPCodecType, direction RTPTransceiverDirection) *RTPTransceiver {
-		return &RTPTransceiver{kind: kind, Direction: direction}
+		r := &RTPTransceiver{kind: kind}
+		r.setDirection(direction)
+
+		return r
 	}
 
 	for _, test := range []struct {
@@ -418,7 +429,7 @@ func TestPeerConnection_satisfyTypeAndDirection(t *testing.T) {
 			[]*RTPTransceiver{createTransceiver(RTPCodecTypeVideo, RTPTransceiverDirectionRecvonly)},
 		},
 		{
-			"Don't satisify a Sendonly with a SendRecv, later SendRecv will be marked as Inactive",
+			"Don't satisfy a Sendonly with a SendRecv, later SendRecv will be marked as Inactive",
 			[]RTPCodecType{RTPCodecTypeVideo, RTPCodecTypeVideo},
 			[]RTPTransceiverDirection{RTPTransceiverDirectionSendonly, RTPTransceiverDirectionSendrecv},
 
@@ -464,16 +475,16 @@ func TestOneAttrKeyConnectionSetupPerMediaDescriptionInSDP(t *testing.T) {
 	pc, err := NewPeerConnection(Configuration{})
 	assert.NoError(t, err)
 
-	_, err = pc.AddTransceiver(RTPCodecTypeVideo)
+	_, err = pc.AddTransceiverFromKind(RTPCodecTypeVideo)
 	assert.NoError(t, err)
 
-	_, err = pc.AddTransceiver(RTPCodecTypeAudio)
+	_, err = pc.AddTransceiverFromKind(RTPCodecTypeAudio)
 	assert.NoError(t, err)
 
-	_, err = pc.AddTransceiver(RTPCodecTypeAudio)
+	_, err = pc.AddTransceiverFromKind(RTPCodecTypeAudio)
 	assert.NoError(t, err)
 
-	_, err = pc.AddTransceiver(RTPCodecTypeVideo)
+	_, err = pc.AddTransceiverFromKind(RTPCodecTypeVideo)
 	assert.NoError(t, err)
 
 	sdp, err := pc.CreateOffer(nil)
@@ -485,6 +496,7 @@ func TestOneAttrKeyConnectionSetupPerMediaDescriptionInSDP(t *testing.T) {
 
 	// 5 because a datachannel is always added
 	assert.Len(t, matches, 5)
+	assert.NoError(t, pc.Close())
 }
 
 // Assert that candidates are gathered by calling SetLocalDescription, not SetRemoteDescription
@@ -492,6 +504,9 @@ func TestOneAttrKeyConnectionSetupPerMediaDescriptionInSDP(t *testing.T) {
 func TestGatherOnSetLocalDescription(t *testing.T) {
 	lim := test.TimeOut(time.Second * 30)
 	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
 
 	pcOfferGathered := make(chan SessionDescription)
 	pcAnswerGathered := make(chan SessionDescription)
@@ -553,11 +568,15 @@ func TestGatherOnSetLocalDescription(t *testing.T) {
 	} else if err = pcAnswer.SetLocalDescription(answer); err != nil {
 		t.Error(err.Error())
 	}
-
 	<-pcAnswerGathered
+	assert.NoError(t, pcOffer.Close())
+	assert.NoError(t, pcAnswer.Close())
 }
 
 func TestPeerConnection_OfferingLite(t *testing.T) {
+	report := test.CheckRoutines(t)
+	defer report()
+
 	s := SettingEngine{}
 	s.SetLite(true)
 	offerPC, err := NewAPI(WithSettingEngine(s)).NewPeerConnection(Configuration{})
@@ -586,14 +605,14 @@ func TestPeerConnection_OfferingLite(t *testing.T) {
 	})
 
 	<-iceComplete
-	if err = offerPC.Close(); err != nil {
-		t.Fatal(err)
-	} else if err = answerPC.Close(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, offerPC.Close())
+	assert.NoError(t, answerPC.Close())
 }
 
 func TestPeerConnection_AnsweringLite(t *testing.T) {
+	report := test.CheckRoutines(t)
+	defer report()
+
 	offerPC, err := NewAPI().NewPeerConnection(Configuration{})
 	if err != nil {
 		t.Fatal(err)
@@ -622,9 +641,213 @@ func TestPeerConnection_AnsweringLite(t *testing.T) {
 	})
 
 	<-iceComplete
-	if err = offerPC.Close(); err != nil {
-		t.Fatal(err)
-	} else if err = answerPC.Close(); err != nil {
-		t.Fatal(err)
+	assert.NoError(t, offerPC.Close())
+	assert.NoError(t, answerPC.Close())
+}
+
+func TestOnICEGatheringStateChange(t *testing.T) {
+	seenGathering := &atomicBool{}
+	seenComplete := &atomicBool{}
+
+	seenGatheringAndComplete := make(chan interface{})
+	seenClosed := make(chan interface{})
+
+	s := SettingEngine{}
+	s.SetTrickle(true)
+
+	peerConn, err := NewAPI(WithSettingEngine(s)).NewPeerConnection(Configuration{})
+	assert.NoError(t, err)
+
+	var onStateChange func(s ICEGathererState)
+	onStateChange = func(s ICEGathererState) {
+		// Access to ICEGatherer in the callback must not cause dead lock.
+		peerConn.OnICEGatheringStateChange(onStateChange)
+		if state := peerConn.iceGatherer.State(); state != s {
+			t.Errorf("State change callback argument (%s) and State() (%s) result differs",
+				s, state,
+			)
+		}
+
+		switch s {
+		case ICEGathererStateClosed:
+			close(seenClosed)
+			return
+		case ICEGathererStateGathering:
+			if seenComplete.get() {
+				t.Error("Completed before gathering")
+			}
+			seenGathering.set(true)
+		case ICEGathererStateComplete:
+			seenComplete.set(true)
+		}
+
+		if seenGathering.get() && seenComplete.get() {
+			close(seenGatheringAndComplete)
+		}
 	}
+	peerConn.OnICEGatheringStateChange(onStateChange)
+
+	offer, err := peerConn.CreateOffer(nil)
+	assert.NoError(t, err)
+	assert.NoError(t, peerConn.SetLocalDescription(offer))
+
+	select {
+	case <-time.After(time.Second * 10):
+		t.Fatal("Gathering and Complete were never seen")
+	case <-seenClosed:
+		t.Fatal("Closed before PeerConnection Close")
+	case <-seenGatheringAndComplete:
+	}
+
+	assert.NoError(t, peerConn.Close())
+
+	select {
+	case <-time.After(time.Second * 10):
+		t.Fatal("Closed was never seen")
+	case <-seenClosed:
+	}
+}
+
+// Assert that when Trickle is enabled two connections can connect
+func TestPeerConnectionTrickle(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	s := SettingEngine{}
+	s.SetTrickle(true)
+
+	api := NewAPI(WithSettingEngine(s))
+	offerPC, answerPC, err := api.newPair(Configuration{})
+	assert.NoError(t, err)
+
+	addOrCacheCandidate := func(pc *PeerConnection, c *ICECandidate, candidateCache []ICECandidateInit) []ICECandidateInit {
+		if c == nil {
+			return candidateCache
+		}
+
+		if pc.RemoteDescription() == nil {
+			return append(candidateCache, c.ToJSON())
+		}
+
+		assert.NoError(t, pc.AddICECandidate(c.ToJSON()))
+		return candidateCache
+	}
+
+	candidateLock := sync.RWMutex{}
+	var offerCandidateDone, answerCandidateDone bool
+
+	cachedOfferCandidates := []ICECandidateInit{}
+	offerPC.OnICECandidate(func(c *ICECandidate) {
+		if offerCandidateDone {
+			t.Error("Received OnICECandidate after finishing gathering")
+		}
+		if c == nil {
+			offerCandidateDone = true
+		}
+
+		candidateLock.Lock()
+		defer candidateLock.Unlock()
+
+		cachedOfferCandidates = addOrCacheCandidate(answerPC, c, cachedOfferCandidates)
+	})
+
+	cachedAnswerCandidates := []ICECandidateInit{}
+	answerPC.OnICECandidate(func(c *ICECandidate) {
+		if answerCandidateDone {
+			t.Error("Received OnICECandidate after finishing gathering")
+		}
+		if c == nil {
+			answerCandidateDone = true
+		}
+
+		candidateLock.Lock()
+		defer candidateLock.Unlock()
+
+		cachedAnswerCandidates = addOrCacheCandidate(offerPC, c, cachedAnswerCandidates)
+	})
+
+	offerPCConnected, offerPCConnectedCancel := context.WithCancel(context.Background())
+	offerPC.OnICEConnectionStateChange(func(i ICEConnectionState) {
+		if i == ICEConnectionStateConnected {
+			offerPCConnectedCancel()
+		}
+	})
+
+	answerPCConnected, answerPCConnectedCancel := context.WithCancel(context.Background())
+	answerPC.OnICEConnectionStateChange(func(i ICEConnectionState) {
+		if i == ICEConnectionStateConnected {
+			answerPCConnectedCancel()
+		}
+	})
+
+	offer, err := offerPC.CreateOffer(nil)
+	assert.NoError(t, err)
+
+	assert.NoError(t, offerPC.SetLocalDescription(offer))
+	assert.NoError(t, answerPC.SetRemoteDescription(offer))
+
+	answer, err := answerPC.CreateAnswer(nil)
+	assert.NoError(t, err)
+
+	assert.NoError(t, answerPC.SetLocalDescription(answer))
+	assert.NoError(t, offerPC.SetRemoteDescription(answer))
+
+	candidateLock.Lock()
+	for _, c := range cachedAnswerCandidates {
+		assert.NoError(t, offerPC.AddICECandidate(c))
+	}
+	for _, c := range cachedOfferCandidates {
+		assert.NoError(t, answerPC.AddICECandidate(c))
+	}
+	candidateLock.Unlock()
+
+	<-answerPCConnected.Done()
+	<-offerPCConnected.Done()
+	assert.NoError(t, offerPC.Close())
+	assert.NoError(t, answerPC.Close())
+}
+
+// Issue #1121, assert populateLocalCandidates doesn't mutate
+func TestPopulateLocalCandidates(t *testing.T) {
+	t.Run("PendingLocalDescription shouldn't add extra mutations", func(t *testing.T) {
+		pc, err := NewPeerConnection(Configuration{})
+		assert.NoError(t, err)
+
+		offer, err := pc.CreateOffer(nil)
+		assert.NoError(t, err)
+
+		assert.NoError(t, pc.SetLocalDescription(offer))
+		assert.Equal(t, pc.PendingLocalDescription(), pc.PendingLocalDescription())
+		assert.NoError(t, pc.Close())
+	})
+
+	t.Run("end-of-candidates only when gathering is complete", func(t *testing.T) {
+		s := SettingEngine{}
+		s.SetTrickle(true)
+
+		pc, err := NewAPI(WithSettingEngine(s)).NewPeerConnection(Configuration{})
+		assert.NoError(t, err)
+
+		gatherComplete, gatherCompleteCancel := context.WithCancel(context.Background())
+		pc.OnICEGatheringStateChange(func(i ICEGathererState) {
+			if i == ICEGathererStateComplete {
+				gatherCompleteCancel()
+			}
+		})
+
+		offer, err := pc.CreateOffer(nil)
+		assert.NoError(t, err)
+		assert.NotContains(t, offer.SDP, "a=candidate")
+		assert.NotContains(t, offer.SDP, "a=end-of-candidates")
+
+		assert.NoError(t, pc.SetLocalDescription(offer))
+		<-gatherComplete.Done()
+		assert.Contains(t, pc.PendingLocalDescription().SDP, "a=candidate")
+		assert.Contains(t, pc.PendingLocalDescription().SDP, "a=end-of-candidates")
+
+		assert.NoError(t, pc.Close())
+	})
 }

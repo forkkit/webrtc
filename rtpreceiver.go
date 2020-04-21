@@ -66,7 +66,7 @@ func (r *RTPReceiver) Receive(parameters RTPReceiveParameters) error {
 		return fmt.Errorf("Receive has already been called")
 	default:
 	}
-	close(r.received)
+	defer close(r.received)
 
 	r.track = &Track{
 		kind:     r.kind,
@@ -114,6 +114,15 @@ func (r *RTPReceiver) ReadRTCP() ([]rtcp.Packet, error) {
 	return rtcp.Unmarshal(b[:i])
 }
 
+func (r *RTPReceiver) haveReceived() bool {
+	select {
+	case <-r.received:
+		return true
+	default:
+		return false
+	}
+}
+
 // Stop irreversibly stops the RTPReceiver
 func (r *RTPReceiver) Stop() error {
 	r.mu.Lock()
@@ -127,11 +136,15 @@ func (r *RTPReceiver) Stop() error {
 
 	select {
 	case <-r.received:
-		if err := r.rtcpReadStream.Close(); err != nil {
-			return err
+		if r.rtcpReadStream != nil {
+			if err := r.rtcpReadStream.Close(); err != nil {
+				return err
+			}
 		}
-		if err := r.rtpReadStream.Close(); err != nil {
-			return err
+		if r.rtpReadStream != nil {
+			if err := r.rtpReadStream.Close(); err != nil {
+				return err
+			}
 		}
 	default:
 	}

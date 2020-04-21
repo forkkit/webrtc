@@ -1,10 +1,12 @@
 # save-to-disk
-save-to-disk is a simple application that shows how to record your webcam using Pion WebRTC and save to disk.
+save-to-disk is a simple application that shows how to record your webcam/microphone using Pion WebRTC and save VP8/Opus to disk.
+
+If you wish to save H264 to disk checkout out [save-to-webm](https://github.com/pion/example-webrtc-applications/tree/master/save-to-webm)
 
 ## Instructions
 ### Download save-to-disk
 ```
-go get github.com/pion/webrtc/examples/save-to-disk
+go get github.com/pion/webrtc/v2/examples/save-to-disk
 ```
 
 ### Open save-to-disk example page

@@ -162,7 +162,7 @@ func (d *DataChannel) Label() string {
 // out-of-order delivery is allowed.
 func (d *DataChannel) Ordered() bool {
 	ordered := d.underlying.Get("ordered")
-	if ordered == js.Undefined() {
+	if jsValueIsUndefined(ordered) {
 		return true // default is true
 	}
 	return ordered.Bool()
@@ -171,7 +171,7 @@ func (d *DataChannel) Ordered() bool {
 // MaxPacketLifeTime represents the length of the time window (msec) during
 // which transmissions and retransmissions may occur in unreliable mode.
 func (d *DataChannel) MaxPacketLifeTime() *uint16 {
-	if d.underlying.Get("maxPacketLifeTime") != js.Undefined() {
+	if !jsValueIsUndefined(d.underlying.Get("maxPacketLifeTime")) {
 		return valueToUint16Pointer(d.underlying.Get("maxPacketLifeTime"))
 	} else {
 		// See https://bugs.chromium.org/p/chromium/issues/detail?id=696681
@@ -206,11 +206,6 @@ func (d *DataChannel) Negotiated() bool {
 func (d *DataChannel) ID() *uint16 {
 	return valueToUint16Pointer(d.underlying.Get("id"))
 }
-
-// NOTE(albrow): Apparently not part of the JavaScript WebRTC API
-// // Priority represents the priority for this DataChannel. The priority is
-// // assigned at channel creation time.
-// Priority PriorityType
 
 // ReadyState represents the state of the DataChannel object.
 func (d *DataChannel) ReadyState() DataChannelState {

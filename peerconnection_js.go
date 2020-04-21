@@ -18,11 +18,12 @@ type PeerConnection struct {
 
 	// Keep track of handlers/callbacks so we can call Release as required by the
 	// syscall/js API. Initially nil.
-	onSignalingStateChangeHandler    *js.Func
-	onDataChannelHandler             *js.Func
-	onICEConectionStateChangeHandler *js.Func
-	onICECandidateHandler            *js.Func
-	onICEGatheringStateChangeHandler *js.Func
+	onSignalingStateChangeHandler     *js.Func
+	onDataChannelHandler              *js.Func
+	onConnectionStateChangeHandler    *js.Func
+	onICEConnectionStateChangeHandler *js.Func
+	onICECandidateHandler             *js.Func
+	onICEGatheringStateChangeHandler  *js.Func
 
 	// A reference to the associated API state used by this connection
 	api *API
@@ -90,25 +91,36 @@ func (pc *PeerConnection) OnDataChannel(f func(*DataChannel)) {
 	pc.underlying.Set("ondatachannel", onDataChannelHandler)
 }
 
-// OnTrack sets an event handler which is called when remote track
-// arrives from a remote peer.
-// func (pc *PeerConnection) OnTrack(f func(*Track, *RTPReceiver)) {
-// }
-
 // OnICEConnectionStateChange sets an event handler which is called
 // when an ICE connection state is changed.
 func (pc *PeerConnection) OnICEConnectionStateChange(f func(ICEConnectionState)) {
-	if pc.onICEConectionStateChangeHandler != nil {
-		oldHandler := pc.onICEConectionStateChangeHandler
+	if pc.onICEConnectionStateChangeHandler != nil {
+		oldHandler := pc.onICEConnectionStateChangeHandler
 		defer oldHandler.Release()
 	}
-	onICEConectionStateChangeHandler := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+	onICEConnectionStateChangeHandler := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		connectionState := NewICEConnectionState(pc.underlying.Get("iceConnectionState").String())
 		go f(connectionState)
 		return js.Undefined()
 	})
-	pc.onICEConectionStateChangeHandler = &onICEConectionStateChangeHandler
-	pc.underlying.Set("oniceconnectionstatechange", onICEConectionStateChangeHandler)
+	pc.onICEConnectionStateChangeHandler = &onICEConnectionStateChangeHandler
+	pc.underlying.Set("oniceconnectionstatechange", onICEConnectionStateChangeHandler)
+}
+
+// OnConnectionStateChange sets an event handler which is called
+// when an PeerConnectionState is changed.
+func (pc *PeerConnection) OnConnectionStateChange(f func(PeerConnectionState)) {
+	if pc.onConnectionStateChangeHandler != nil {
+		oldHandler := pc.onConnectionStateChangeHandler
+		defer oldHandler.Release()
+	}
+	onConnectionStateChangeHandler := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		connectionState := newPeerConnectionState(pc.underlying.Get("connectionState").String())
+		go f(connectionState)
+		return js.Undefined()
+	})
+	pc.onConnectionStateChangeHandler = &onConnectionStateChangeHandler
+	pc.underlying.Set("onconnectionstatechange", onConnectionStateChangeHandler)
 }
 
 func (pc *PeerConnection) checkConfiguration(configuration Configuration) error {
@@ -318,28 +330,6 @@ func (pc *PeerConnection) OnICEGatheringStateChange(f func()) {
 	pc.underlying.Set("onicegatheringstatechange", onICEGatheringStateChangeHandler)
 }
 
-// // GetSenders returns the RTPSender that are currently attached to this PeerConnection
-// func (pc *PeerConnection) GetSenders() []*RTPSender {
-// }
-
-// // GetReceivers returns the RTPReceivers that are currently attached to this RTCPeerConnection
-// func (pc *PeerConnection) GetReceivers() []*RTPReceiver {
-// }
-
-// // GetTransceivers returns the RTCRtpTransceiver that are currently attached to this RTCPeerConnection
-// func (pc *PeerConnection) GetTransceivers() []*RTPTransceiver {
-// }
-
-// // AddTrack adds a Track to the PeerConnection
-// func (pc *PeerConnection) AddTrack(track *Track) (*RTPSender, error) {
-// }
-
-// func (pc *PeerConnection) RemoveTrack() {
-// }
-
-// func (pc *PeerConnection) AddTransceiver() RTPTransceiver {
-// }
-
 // CreateDataChannel creates a new DataChannel object with the given label
 // and optional DataChannelInit used to configure properties of the
 // underlying channel such as data reliability.
@@ -367,11 +357,6 @@ func (pc *PeerConnection) SetIdentityProvider(provider string) (err error) {
 	return nil
 }
 
-// Note: WriteRTCP is not supported.
-// func (pc *PeerConnection) WriteRTCP(pkt rtcp.Packet) error {
-// 	return errors.New("Not yet implemented")
-// }
-
 // Close ends the PeerConnection
 func (pc *PeerConnection) Close() (err error) {
 	defer func() {
@@ -389,8 +374,11 @@ func (pc *PeerConnection) Close() (err error) {
 	if pc.onDataChannelHandler != nil {
 		pc.onDataChannelHandler.Release()
 	}
-	if pc.onICEConectionStateChangeHandler != nil {
-		pc.onICEConectionStateChangeHandler.Release()
+	if pc.onConnectionStateChangeHandler != nil {
+		pc.onConnectionStateChangeHandler.Release()
+	}
+	if pc.onICEConnectionStateChangeHandler != nil {
+		pc.onICEConnectionStateChangeHandler.Release()
 	}
 	if pc.onICECandidateHandler != nil {
 		pc.onICECandidateHandler.Release()
@@ -401,11 +389,6 @@ func (pc *PeerConnection) Close() (err error) {
 
 	return nil
 }
-
-// NewTrack Creates a new Track
-// func (pc *PeerConnection) NewTrack(payloadType uint8, ssrc uint32, id, label string) (*Track, error) {
-// 	return nil, errors.New("Not yet implemented")
-// }
 
 // CurrentLocalDescription represents the local description that was
 // successfully negotiated the last time the PeerConnection transitioned
@@ -503,7 +486,7 @@ func iceServerToValue(server ICEServer) js.Value {
 }
 
 func valueToConfiguration(configValue js.Value) Configuration {
-	if configValue == js.Null() || configValue == js.Undefined() {
+	if jsValueIsNull(configValue) || jsValueIsUndefined(configValue) {
 		return Configuration{}
 	}
 	return Configuration{
@@ -520,7 +503,7 @@ func valueToConfiguration(configValue js.Value) Configuration {
 }
 
 func valueToICEServers(iceServersValue js.Value) []ICEServer {
-	if iceServersValue == js.Null() || iceServersValue == js.Undefined() {
+	if jsValueIsNull(iceServersValue) || jsValueIsUndefined(iceServersValue) {
 		return nil
 	}
 	iceServers := make([]ICEServer, iceServersValue.Length())
@@ -541,7 +524,7 @@ func valueToICEServer(iceServerValue js.Value) ICEServer {
 }
 
 func valueToICECandidate(val js.Value) *ICECandidate {
-	if val == js.Null() || val == js.Undefined() {
+	if jsValueIsNull(val) || jsValueIsUndefined(val) {
 		return nil
 	}
 	protocol, _ := NewICEProtocol(val.Get("protocol").String())
@@ -581,7 +564,7 @@ func sessionDescriptionToValue(desc *SessionDescription) js.Value {
 }
 
 func valueToSessionDescription(descValue js.Value) *SessionDescription {
-	if descValue == js.Null() || descValue == js.Undefined() {
+	if jsValueIsNull(descValue) || jsValueIsUndefined(descValue) {
 		return nil
 	}
 	return &SessionDescription{
@@ -634,9 +617,5 @@ func dataChannelInitToValue(options *DataChannelInit) js.Value {
 		"protocol":          stringPointerToValue(options.Protocol),
 		"negotiated":        boolPointerToValue(options.Negotiated),
 		"id":                uint16PointerToValue(options.ID),
-
-		// Note(albrow) Priority is not included in MDN WebRTC documentation. Should
-		// we include it here?
-		// "priority": options.Priority
 	})
 }

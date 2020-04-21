@@ -1,3 +1,4 @@
+// Package samplebuilder provides functionality to reconstruct media frame from RTP packets
 package samplebuilder
 
 import (
@@ -24,11 +25,18 @@ type SampleBuilder struct {
 	isContiguous     bool
 	lastPopSeq       uint16
 	lastPopTimestamp uint32
+
+	// Interface that checks whether the packet is the first fragment of the frame or not
+	partitionHeadChecker rtp.PartitionHeadChecker
 }
 
 // New constructs a new SampleBuilder
-func New(maxLate uint16, depacketizer rtp.Depacketizer) *SampleBuilder {
-	return &SampleBuilder{maxLate: maxLate, depacketizer: depacketizer}
+func New(maxLate uint16, depacketizer rtp.Depacketizer, opts ...Option) *SampleBuilder {
+	s := &SampleBuilder{maxLate: maxLate, depacketizer: depacketizer}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Push adds a RTP Packet to the sample builder
@@ -40,15 +48,20 @@ func (s *SampleBuilder) Push(p *rtp.Packet) {
 
 // We have a valid collection of RTP Packets
 // walk forwards building a sample if everything looks good clear and update buffer+values
-func (s *SampleBuilder) buildSample(firstBuffer uint16) *media.Sample {
+func (s *SampleBuilder) buildSample(firstBuffer uint16) (*media.Sample, uint32) {
 	data := []byte{}
 
 	for i := firstBuffer; s.buffer[i] != nil; i++ {
 		if s.buffer[i].Timestamp != s.buffer[firstBuffer].Timestamp {
 			lastTimeStamp := s.lastPopTimestamp
-			if !s.isContiguous && s.buffer[firstBuffer-1] != nil {
-				// firstBuffer-1 should always pass, but just to be safe if there is a bug in Pop()
-				lastTimeStamp = s.buffer[firstBuffer-1].Timestamp
+			if !s.isContiguous {
+				if s.buffer[firstBuffer-1] != nil {
+					lastTimeStamp = s.buffer[firstBuffer-1].Timestamp
+				} else {
+					// If PartitionHeadChecker detects that the first packet is a head,
+					// the duration of the packet is not guessable
+					lastTimeStamp = s.buffer[firstBuffer].Timestamp
+				}
 			}
 
 			samples := s.buffer[i-1].Timestamp - lastTimeStamp
@@ -58,30 +71,38 @@ func (s *SampleBuilder) buildSample(firstBuffer uint16) *media.Sample {
 			for j := firstBuffer; j < i; j++ {
 				s.buffer[j] = nil
 			}
-			return &media.Sample{Data: data, Samples: samples}
+			return &media.Sample{Data: data, Samples: samples}, s.lastPopTimestamp
 		}
 
 		p, err := s.depacketizer.Unmarshal(s.buffer[i].Payload)
 		if err != nil {
-			return nil
+			return nil, 0
 		}
 
 		data = append(data, p...)
 	}
-	return nil
+	return nil, 0
 }
 
 // Distance between two seqnums
 func seqnumDistance(x, y uint16) uint16 {
-	if x > y {
-		return x - y
+	diff := int16(x - y)
+	if diff < 0 {
+		return uint16(-diff)
 	}
 
-	return y - x
+	return uint16(diff)
 }
 
 // Pop scans buffer for valid samples, returns nil when no valid samples have been found
 func (s *SampleBuilder) Pop() *media.Sample {
+	sample, _ := s.PopWithTimestamp()
+	return sample
+}
+
+// PopWithTimestamp scans buffer for valid samples and its RTP timestamp,
+// returns nil, 0 when no valid samples have been found
+func (s *SampleBuilder) PopWithTimestamp() (*media.Sample, uint32) {
 	var i uint16
 	if !s.isContiguous {
 		i = s.lastPush - s.maxLate
@@ -97,23 +118,36 @@ func (s *SampleBuilder) Pop() *media.Sample {
 	for ; i != s.lastPush; i++ {
 		curr := s.buffer[i]
 		if curr == nil {
-			if s.buffer[i-1] != nil {
-				break // there is a gap, we can't proceed
-			}
-
 			continue // we haven't hit a buffer yet, keep moving
 		}
 
 		if !s.isContiguous {
-			if s.buffer[i-1] == nil {
-				continue // We have never popped a buffer, so we can't assert that the first RTP packet we encounter is valid
-			} else if s.buffer[i-1].Timestamp == curr.Timestamp {
-				continue // We have the same timestamps, so it is data that spans multiple RTP packets
+			if s.partitionHeadChecker == nil {
+				if s.buffer[i-1] == nil {
+					continue // We have never popped a buffer, so we can't assert that the first RTP packet we encounter is valid
+				} else if s.buffer[i-1].Timestamp == curr.Timestamp {
+					continue // We have the same timestamps, so it is data that spans multiple RTP packets
+				}
+			} else {
+				if !s.partitionHeadChecker.IsPartitionHead(curr.Payload) {
+					continue
+				}
+				// We can start using this frame as it is a head of frame partition
 			}
 		}
 
 		// Initial validity checks have passed, walk forward
 		return s.buildSample(i)
 	}
-	return nil
+	return nil, 0
+}
+
+// Option configures SampleBuilder
+type Option func(o *SampleBuilder)
+
+// WithPartitionHeadChecker assigns codec specific PartitionHeadChecker to SampleBuilder
+func WithPartitionHeadChecker(checker rtp.PartitionHeadChecker) Option {
+	return func(o *SampleBuilder) {
+		o.partitionHeadChecker = checker
+	}
 }

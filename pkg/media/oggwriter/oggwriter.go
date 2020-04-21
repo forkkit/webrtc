@@ -1,3 +1,4 @@
+// Package oggwriter implements OGG media container writer
 package oggwriter
 
 import (
@@ -15,7 +16,7 @@ const (
 	pageHeaderTypeContinuationOfStream = 0x00
 	pageHeaderTypeBeginningOfStream    = 0x02
 	pageHeaderTypeEndOfStream          = 0x04
-	defaultPreSkip                     = 3840 // 3840 recommanded in the RFC
+	defaultPreSkip                     = 3840 // 3840 recommended in the RFC
 	idPageSignature                    = "OpusHead"
 	commentPageSignature               = "OpusTags"
 	pageHeaderSignature                = "OggS"
@@ -197,6 +198,10 @@ func (i *OggWriter) Close() error {
 	// Returns no error has it may be convenient to call
 	// Close() multiple times
 	if i.fd == nil {
+		// Close stream if we are operating on a stream
+		if closer, ok := i.stream.(io.Closer); ok {
+			return closer.Close()
+		}
 		return nil
 	}
 

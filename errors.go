@@ -19,13 +19,13 @@ var (
 	// ErrCertificateExpired indicates that an x509 certificate has expired.
 	ErrCertificateExpired = errors.New("x509Cert expired")
 
-	// ErrNoTurnCredencials indicates that a TURN server URL was provided
+	// ErrNoTurnCredentials indicates that a TURN server URL was provided
 	// without required credentials.
-	ErrNoTurnCredencials = errors.New("turn server credentials required")
+	ErrNoTurnCredentials = errors.New("turn server credentials required")
 
-	// ErrTurnCredencials indicates that provided TURN credentials are partial
+	// ErrTurnCredentials indicates that provided TURN credentials are partial
 	// or malformed.
-	ErrTurnCredencials = errors.New("invalid turn server credentials")
+	ErrTurnCredentials = errors.New("invalid turn server credentials")
 
 	// ErrExistingTrack indicates that a track already exists.
 	ErrExistingTrack = errors.New("track already exists")
@@ -83,4 +83,32 @@ var (
 	// ErrIncorrectSDPSemantics indicates that the PeerConnection was configured to
 	// generate SDP Answers with different SDP Semantics than the received Offer
 	ErrIncorrectSDPSemantics = errors.New("offer SDP semantics does not match configuration")
+
+	// ErrProtocolTooLarge indicates that value given for a DataChannelInit protocol is
+	//longer then 65535 bytes
+	ErrProtocolTooLarge = errors.New("protocol is larger then 65535 bytes")
+
+	// ErrSenderNotCreatedByConnection indicates RemoveTrack was called with a RtpSender not created
+	// by this PeerConnection
+	ErrSenderNotCreatedByConnection = errors.New("RtpSender not created by this PeerConnection")
+
+	// ErrSessionDescriptionNoFingerprint indicates SetRemoteDescription was called with a SessionDescription that has no
+	// fingerprint
+	ErrSessionDescriptionNoFingerprint = errors.New("SetRemoteDescription called with no fingerprint")
+
+	// ErrSessionDescriptionInvalidFingerprint indicates SetRemoteDescription was called with a SessionDescription that
+	// has an invalid fingerprint
+	ErrSessionDescriptionInvalidFingerprint = errors.New("SetRemoteDescription called with an invalid fingerprint")
+
+	// ErrSessionDescriptionConflictingFingerprints indicates SetRemoteDescription was called with a SessionDescription that
+	// has an conflicting fingerprints
+	ErrSessionDescriptionConflictingFingerprints = errors.New("SetRemoteDescription called with multiple conflicting fingerprint")
+
+	// ErrSessionDescriptionMissingIceUfrag indicates SetRemoteDescription was called with a SessionDescription that
+	// is missing an ice-ufrag value
+	ErrSessionDescriptionMissingIceUfrag = errors.New("SetRemoteDescription called with no ice-ufrag")
+
+	// ErrSessionDescriptionMissingIcePwd indicates SetRemoteDescription was called with a SessionDescription that
+	// is missing an ice-pwd value
+	ErrSessionDescriptionMissingIcePwd = errors.New("SetRemoteDescription called with no ice-pwd")
 )

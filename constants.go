@@ -5,6 +5,8 @@ const (
 	// comparisons when no value was defined.
 	Unknown    = iota
 	unknownStr = "unknown"
+	ssrcStr    = "ssrc"
 
-	receiveMTU = 8192
+	// Equal to UDP MTU
+	receiveMTU = 1460
 )

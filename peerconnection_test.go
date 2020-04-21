@@ -30,13 +30,16 @@ func newPair() (pcOffer *PeerConnection, pcAnswer *PeerConnection, err error) {
 }
 
 func signalPair(pcOffer *PeerConnection, pcAnswer *PeerConnection) error {
-	offerChan := make(chan SessionDescription)
-	pcOffer.OnICECandidate(func(candidate *ICECandidate) {
-		if candidate == nil {
-			offerChan <- *pcOffer.PendingLocalDescription()
-		}
-	})
+	iceGatheringState := pcOffer.ICEGatheringState()
+	offerChan := make(chan SessionDescription, 1)
 
+	if iceGatheringState != ICEGatheringStateComplete {
+		pcOffer.OnICECandidate(func(candidate *ICECandidate) {
+			if candidate == nil {
+				offerChan <- *pcOffer.PendingLocalDescription()
+			}
+		})
+	}
 	// Note(albrow): We need to create a data channel in order to trigger ICE
 	// candidate gathering in the background for the JavaScript/Wasm bindings. If
 	// we don't do this, the complete offer including ICE candidates will never be
@@ -53,9 +56,11 @@ func signalPair(pcOffer *PeerConnection, pcAnswer *PeerConnection) error {
 		return err
 	}
 
-	timeout := time.After(3 * time.Second)
+	if iceGatheringState == ICEGatheringStateComplete {
+		offerChan <- offer
+	}
 	select {
-	case <-timeout:
+	case <-time.After(3 * time.Second):
 		return fmt.Errorf("timed out waiting to receive offer")
 	case offer := <-offerChan:
 		if err := pcAnswer.SetRemoteDescription(offer); err != nil {
@@ -84,29 +89,32 @@ type testCatchAllLeveledLogger struct {
 	callback func(string)
 }
 
-func (t testCatchAllLeveledLogger) handleMsg(format string, args ...interface{}) {
+func (t testCatchAllLeveledLogger) handleMsg(msg string) {
+	t.callback(msg)
+}
+func (t testCatchAllLeveledLogger) handleMsgf(format string, args ...interface{}) {
 	t.callback(fmt.Sprintf(format, args...))
 }
 
 func (t testCatchAllLeveledLogger) Trace(msg string) { t.handleMsg(msg) }
 func (t testCatchAllLeveledLogger) Tracef(format string, args ...interface{}) {
-	t.handleMsg(format, args...)
+	t.handleMsgf(format, args...)
 }
 func (t testCatchAllLeveledLogger) Debug(msg string) { t.handleMsg(msg) }
 func (t testCatchAllLeveledLogger) Debugf(format string, args ...interface{}) {
-	t.handleMsg(format, args...)
+	t.handleMsgf(format, args...)
 }
 func (t testCatchAllLeveledLogger) Info(msg string) { t.handleMsg(msg) }
 func (t testCatchAllLeveledLogger) Infof(format string, args ...interface{}) {
-	t.handleMsg(format, args...)
+	t.handleMsgf(format, args...)
 }
 func (t testCatchAllLeveledLogger) Warn(msg string) { t.handleMsg(msg) }
 func (t testCatchAllLeveledLogger) Warnf(format string, args ...interface{}) {
-	t.handleMsg(format, args...)
+	t.handleMsgf(format, args...)
 }
 func (t testCatchAllLeveledLogger) Error(msg string) { t.handleMsg(msg) }
 func (t testCatchAllLeveledLogger) Errorf(format string, args ...interface{}) {
-	t.handleMsg(format, args...)
+	t.handleMsgf(format, args...)
 }
 
 type testCatchAllLoggerFactory struct {
@@ -367,14 +375,16 @@ func TestPeerConnection_EventHandlers(t *testing.T) {
 	wasCalledMut := &sync.Mutex{}
 	// wg is used to wait for all event handlers to be called.
 	wg := &sync.WaitGroup{}
-	wg.Add(4)
+	wg.Add(6)
 
 	// Each sync.Once is used to ensure that we call wg.Done once for each event
 	// handler and don't add multiple entries to wasCalled. The event handlers can
 	// be called more than once in some cases.
 	onceOffererOnICEConnectionStateChange := &sync.Once{}
+	onceOffererOnConnectionStateChange := &sync.Once{}
 	onceOffererOnSignalingStateChange := &sync.Once{}
 	onceAnswererOnICEConnectionStateChange := &sync.Once{}
+	onceAnswererOnConnectionStateChange := &sync.Once{}
 	onceAnswererOnSignalingStateChange := &sync.Once{}
 
 	// Register all the event handlers.
@@ -383,6 +393,18 @@ func TestPeerConnection_EventHandlers(t *testing.T) {
 			wasCalledMut.Lock()
 			defer wasCalledMut.Unlock()
 			wasCalled = append(wasCalled, "offerer OnICEConnectionStateChange")
+			wg.Done()
+		})
+	})
+	pcOffer.OnConnectionStateChange(func(callbackState PeerConnectionState) {
+		if storedState := pcOffer.ConnectionState(); callbackState != storedState {
+			t.Errorf("State in callback argument is different from ConnectionState(): callbackState=%s, storedState=%s", callbackState, storedState)
+		}
+
+		onceOffererOnConnectionStateChange.Do(func() {
+			wasCalledMut.Lock()
+			defer wasCalledMut.Unlock()
+			wasCalled = append(wasCalled, "offerer OnConnectionStateChange")
 			wg.Done()
 		})
 	})
@@ -399,6 +421,14 @@ func TestPeerConnection_EventHandlers(t *testing.T) {
 			wasCalledMut.Lock()
 			defer wasCalledMut.Unlock()
 			wasCalled = append(wasCalled, "answerer OnICEConnectionStateChange")
+			wg.Done()
+		})
+	})
+	pcAnswer.OnConnectionStateChange(func(PeerConnectionState) {
+		onceAnswererOnConnectionStateChange.Do(func() {
+			wasCalledMut.Lock()
+			defer wasCalledMut.Unlock()
+			wasCalled = append(wasCalled, "answerer OnConnectionStateChange")
 			wg.Done()
 		})
 	})
@@ -443,17 +473,17 @@ func TestMultipleOfferAnswer(t *testing.T) {
 		t.Errorf("Second Offer: got error: %v", err)
 	}
 
-	tricklePeerConn, err := NewPeerConnection(Configuration{})
+	secondPeerConn, err := NewPeerConnection(Configuration{})
 	if err != nil {
 		t.Errorf("New PeerConnection: got error: %v", err)
 	}
-	tricklePeerConn.OnICECandidate(func(i *ICECandidate) {
+	secondPeerConn.OnICECandidate(func(i *ICECandidate) {
 	})
 
-	if _, err = tricklePeerConn.CreateOffer(nil); err != nil {
+	if _, err = secondPeerConn.CreateOffer(nil); err != nil {
 		t.Errorf("First Offer: got error: %v", err)
 	}
-	if _, err = tricklePeerConn.CreateOffer(nil); err != nil {
+	if _, err = secondPeerConn.CreateOffer(nil); err != nil {
 		t.Errorf("Second Offer: got error: %v", err)
 	}
 }

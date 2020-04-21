@@ -11,46 +11,14 @@ import (
 	"math/big"
 	"reflect"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/pion/datachannel"
 	"github.com/pion/logging"
 	"github.com/pion/transport/test"
 	"github.com/stretchr/testify/assert"
 )
-
-func TestGenerateDataChannelID(t *testing.T) {
-	api := NewAPI()
-
-	testCases := []struct {
-		client bool
-		c      *PeerConnection
-		result uint16
-	}{
-		{true, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{}, api: api}, 0},
-		{true, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{1: nil}, api: api}, 0},
-		{true, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{0: nil}, api: api}, 2},
-		{true, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{0: nil, 2: nil}, api: api}, 4},
-		{true, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{0: nil, 4: nil}, api: api}, 2},
-		{false, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{}, api: api}, 1},
-		{false, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{0: nil}, api: api}, 1},
-		{false, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{1: nil}, api: api}, 3},
-		{false, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{1: nil, 3: nil}, api: api}, 5},
-		{false, &PeerConnection{sctpTransport: api.NewSCTPTransport(nil), dataChannels: map[uint16]*DataChannel{1: nil, 5: nil}, api: api}, 3},
-	}
-
-	for _, testCase := range testCases {
-		id, err := testCase.c.generateDataChannelID(testCase.client)
-		if err != nil {
-			t.Errorf("failed to generate id: %v", err)
-			return
-		}
-		if id != testCase.result {
-			t.Errorf("Wrong id: %d expected %d", id, testCase.result)
-		}
-	}
-}
 
 func TestDataChannel_EventHandlers(t *testing.T) {
 	to := test.TimeOut(time.Second * 20)
@@ -156,7 +124,7 @@ func TestDataChannelParamters_Go(t *testing.T) {
 			MaxPacketLifeTime: &maxPacketLifeTime,
 		}
 
-		offerPC, answerPC, dc, done := setUpReliabilityParamTest(t, options)
+		offerPC, answerPC, dc, done := setUpDataChannelParametersTest(t, options)
 
 		// Check if parameters are correctly set
 		assert.True(t, dc.Ordered(), "Ordered should be set to true")
@@ -189,13 +157,11 @@ func TestDataChannelParamters_Go(t *testing.T) {
 		dc.label = "mylabel"
 		dc.protocol = "myprotocol"
 		dc.negotiated = true
-		dc.priority = PriorityTypeMedium
 
 		assert.Equal(t, dc.id, dc.ID(), "should match")
 		assert.Equal(t, dc.label, dc.Label(), "should match")
 		assert.Equal(t, dc.protocol, dc.Protocol(), "should match")
 		assert.Equal(t, dc.negotiated, dc.Negotiated(), "should match")
-		assert.Equal(t, dc.priority, dc.Priority(), "should match")
 		assert.Equal(t, dc.readyState, dc.ReadyState(), "should match")
 		assert.Equal(t, uint64(0), dc.BufferedAmount(), "should match")
 		dc.SetBufferedAmountLowThreshold(1500)
@@ -251,7 +217,7 @@ func TestDataChannelBufferedAmount(t *testing.T) {
 				if e != nil {
 					t.Fatalf("Failed to send string on data channel")
 				}
-				assert.Equal(t, uint64(1500), dc.BufferedAmountLowThreshold(), "value mimatch")
+				assert.Equal(t, uint64(1500), dc.BufferedAmountLowThreshold(), "value mismatch")
 
 				//assert.Equal(t, (i+1)*len(buf), int(dc.BufferedAmount()), "unexpected bufferedAmount")
 			}
@@ -333,7 +299,7 @@ func TestDataChannelBufferedAmount(t *testing.T) {
 				if e != nil {
 					t.Fatalf("Failed to send string on data channel")
 				}
-				assert.Equal(t, uint64(1500), dc.BufferedAmountLowThreshold(), "value mimatch")
+				assert.Equal(t, uint64(1500), dc.BufferedAmountLowThreshold(), "value mismatch")
 
 				//assert.Equal(t, (i+1)*len(buf), int(dc.BufferedAmount()), "unexpected bufferedAmount")
 			}
@@ -354,6 +320,9 @@ func TestDataChannelBufferedAmount(t *testing.T) {
 }
 
 func TestEOF(t *testing.T) {
+	report := test.CheckRoutines(t)
+	defer report()
+
 	log := logging.NewDefaultLoggerFactory().NewLogger("test")
 	label := "test-channel"
 	testData := []byte("this is some test data")
@@ -375,19 +344,24 @@ func TestEOF(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		defer func() { assert.NoError(t, pca.Close(), "should succeed") }()
-		defer func() { assert.NoError(t, pcb.Close(), "should succeed") }()
+		defer closePairNow(t, pca, pcb)
 
 		var wg sync.WaitGroup
 
-		dcChan := make(chan *DataChannel)
+		dcChan := make(chan datachannel.ReadWriteCloser)
 		pcb.OnDataChannel(func(dc *DataChannel) {
 			if dc.Label() != label {
 				return
 			}
 			log.Debug("OnDataChannel was called")
 			dc.OnOpen(func() {
-				dcChan <- dc
+				detached, err2 := dc.Detach()
+				if err2 != nil {
+					log.Debugf("Detach failed: %s\n", err2.Error())
+					t.Error(err2)
+				}
+
+				dcChan <- detached
 			})
 		})
 
@@ -398,17 +372,12 @@ func TestEOF(t *testing.T) {
 			var msg []byte
 
 			log.Debug("Waiting for OnDataChannel")
-			attached := <-dcChan
+			dc := <-dcChan
 			log.Debug("data channel opened")
-			dc, err2 := attached.Detach()
-			if err2 != nil {
-				log.Debugf("Detach failed: %s\n", err2.Error())
-				t.Error(err2)
-			}
 			defer func() { assert.NoError(t, dc.Close(), "should succeed") }()
 
 			log.Debug("Waiting for ping...")
-			msg, err2 = ioutil.ReadAll(dc)
+			msg, err2 := ioutil.ReadAll(dc)
 			log.Debugf("Received ping! \"%s\"\n", string(msg))
 			if err2 != nil {
 				t.Error(err2)
@@ -464,6 +433,9 @@ func TestEOF(t *testing.T) {
 	})
 
 	t.Run("No detach", func(t *testing.T) {
+		lim := test.TimeOut(time.Second * 5)
+		defer lim.Stop()
+
 		// Use Detach data channels mode
 		s := SettingEngine{}
 		//s.DetachDataChannels()
@@ -475,17 +447,16 @@ func TestEOF(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer func() { assert.NoError(t, pca.Close(), "should succeed") }()
-
 		pcb, err := api.NewPeerConnection(config)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer func() { assert.NoError(t, pcb.Close(), "should succeed") }()
+
+		defer closePairNow(t, pca, pcb)
 
 		var dca, dcb *DataChannel
-		var nDCbCbs int32
-		doneCh := make(chan struct{})
+		dcaClosedCh := make(chan struct{})
+		dcbClosedCh := make(chan struct{})
 
 		pcb.OnDataChannel(func(dc *DataChannel) {
 			if dc.Label() != label {
@@ -501,8 +472,9 @@ func TestEOF(t *testing.T) {
 			})
 
 			dcb.OnClose(func() {
+				// (2)
 				log.Debug("pcb: data channel closed")
-				atomic.AddInt32(&nDCbCbs, 1)
+				close(dcbClosedCh)
 			})
 
 			// Register the OnMessage to handle incoming messages
@@ -527,12 +499,13 @@ func TestEOF(t *testing.T) {
 				t.Fatal(err)
 			}
 			log.Debug("pca: sent ping")
-			assert.NoError(t, dca.Close(), "should succeed")
+			assert.NoError(t, dca.Close(), "should succeed") // <-- dca closes
 		})
 
 		dca.OnClose(func() {
+			// (1)
 			log.Debug("pca: data channel closed")
-			close(doneCh)
+			close(dcaClosedCh)
 		})
 
 		// Register the OnMessage to handle incoming messages
@@ -548,7 +521,10 @@ func TestEOF(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		<-doneCh
-		assert.Equal(t, int32(1), atomic.LoadInt32(&nDCbCbs), "dcb should be closed by now")
+		// When dca closes the channel,
+		// (1) dca.Onclose() will fire immediately, then
+		// (2) dcb.OnClose will also fire
+		<-dcaClosedCh // (1)
+		<-dcbClosedCh // (2)
 	})
 }
