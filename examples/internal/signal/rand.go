@@ -1,17 +1,16 @@
 package signal
 
-import (
-	"math/rand"
-	"time"
-)
+import "github.com/pion/randutil"
 
 // RandSeq generates a random string to serve as dummy data
+//
+// It returns a deterministic sequence of values each time a program is run.
+// Use rand.Seed() function in your real applications.
 func RandSeq(n int) string {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	letters := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-	b := make([]rune, n)
-	for i := range b {
-		b[i] = letters[r.Intn(len(letters))]
+	val, err := randutil.GenerateCryptoRandomString(n, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	if err != nil {
+		panic(err)
 	}
-	return string(b)
+
+	return val
 }

@@ -5,10 +5,14 @@ package webrtc
 import (
 	"fmt"
 	"sync/atomic"
+
+	"github.com/pion/rtp"
+	"github.com/pion/sdp/v3"
 )
 
 // RTPTransceiver represents a combination of an RTPSender and an RTPReceiver that share a common mid.
 type RTPTransceiver struct {
+	mid       atomic.Value // string
 	sender    atomic.Value // *RTPSender
 	receiver  atomic.Value // *RTPReceiver
 	direction atomic.Value // RTPTransceiverDirection
@@ -37,6 +41,28 @@ func (t *RTPTransceiver) Receiver() *RTPReceiver {
 	}
 
 	return nil
+}
+
+// setMid sets the RTPTransceiver's mid. If it was already set, will return an error.
+func (t *RTPTransceiver) setMid(mid string) error {
+	if currentMid := t.Mid(); currentMid != "" {
+		return fmt.Errorf("%w: %s to %s", errRTPTransceiverCannotChangeMid, currentMid, mid)
+	}
+	t.mid.Store(mid)
+	return nil
+}
+
+// Mid gets the Transceiver's mid value. When not already set, this value will be set in CreateOffer or CreateAnswer.
+func (t *RTPTransceiver) Mid() string {
+	if v := t.mid.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// Kind returns RTPTransceiver's kind.
+func (t *RTPTransceiver) Kind() RTPCodecType {
+	return t.kind
 }
 
 // Direction returns the RTPTransceiver's current direction
@@ -70,7 +96,7 @@ func (t *RTPTransceiver) setDirection(d RTPTransceiverDirection) {
 }
 
 func (t *RTPTransceiver) setSendingTrack(track *Track) error {
-	t.Sender().track = track
+	t.Sender().setTrack(track)
 	if track == nil {
 		t.setSender(nil)
 	}
@@ -85,9 +111,19 @@ func (t *RTPTransceiver) setSendingTrack(track *Track) error {
 	case track == nil && t.Direction() == RTPTransceiverDirectionSendonly:
 		t.setDirection(RTPTransceiverDirectionInactive)
 	default:
-		return fmt.Errorf("invalid state change in RTPTransceiver.setSending")
+		return errRTPTransceiverSetSendingInvalidState
 	}
 	return nil
+}
+
+func findByMid(mid string, localTransceivers []*RTPTransceiver) (*RTPTransceiver, []*RTPTransceiver) {
+	for i, t := range localTransceivers {
+		if t.Mid() == mid {
+			return t, append(localTransceivers[:i], localTransceivers[i+1:]...)
+		}
+	}
+
+	return nil, localTransceivers
 }
 
 // Given a direction+type pluck a transceiver from the passed list
@@ -102,26 +138,43 @@ func satisfyTypeAndDirection(remoteKind RTPCodecType, remoteDirection RTPTransce
 			return []RTPTransceiverDirection{RTPTransceiverDirectionRecvonly, RTPTransceiverDirectionSendrecv}
 		case RTPTransceiverDirectionRecvonly:
 			return []RTPTransceiverDirection{RTPTransceiverDirectionSendonly, RTPTransceiverDirectionSendrecv}
+		default:
+			return []RTPTransceiverDirection{}
 		}
-		return []RTPTransceiverDirection{}
 	}
 
 	for _, possibleDirection := range getPreferredDirections() {
 		for i := range localTransceivers {
 			t := localTransceivers[i]
-			if t.kind != remoteKind || possibleDirection != t.Direction() {
-				continue
+			if t.Mid() == "" && t.kind == remoteKind && possibleDirection == t.Direction() {
+				return t, append(localTransceivers[:i], localTransceivers[i+1:]...)
 			}
-
-			return t, append(localTransceivers[:i], localTransceivers[i+1:]...)
 		}
 	}
 
-	d := atomic.Value{}
-	d.Store(RTPTransceiverDirectionInactive)
+	return nil, localTransceivers
+}
 
-	return &RTPTransceiver{
-		kind:      remoteKind,
-		direction: d,
-	}, localTransceivers
+// handleUnknownRTPPacket consumes a single RTP Packet and returns information that is helpful
+// for demuxing and handling an unknown SSRC (usually for Simulcast)
+func handleUnknownRTPPacket(buf []byte, sdesMidExtMap, sdesStreamIDExtMap *sdp.ExtMap) (mid, rid string, payloadType uint8, err error) {
+	rp := &rtp.Packet{}
+	if err = rp.Unmarshal(buf); err != nil {
+		return
+	}
+
+	if !rp.Header.Extension {
+		return
+	}
+
+	payloadType = rp.PayloadType
+	if payload := rp.GetExtension(uint8(sdesMidExtMap.Value)); payload != nil {
+		mid = string(payload)
+	}
+
+	if payload := rp.GetExtension(uint8(sdesStreamIDExtMap.Value)); payload != nil {
+		rid = string(payload)
+	}
+
+	return
 }

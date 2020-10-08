@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
-	"github.com/pion/sdp/v2"
+	"github.com/pion/sdp/v3"
 )
 
 // PayloadTypes for the default codecs
@@ -26,34 +27,47 @@ const (
 	mediaNameVideo = "video"
 )
 
-// MediaEngine defines the codecs supported by a PeerConnection
+// A MediaEngine defines the codecs supported by a PeerConnection.
+// MediaEngines populated using RegisterCodec (and RegisterDefaultCodecs)
+// may be set up once and reused, including concurrently,
+// as long as no other codecs are added subsequently.
+// MediaEngines populated using PopulateFromSDP should be used
+// only for that session.
 type MediaEngine struct {
 	codecs []*RTPCodec
 }
 
-// RegisterCodec registers a codec to a media engine
+// RegisterCodec adds codec to m.
+// RegisterCodec is not safe for concurrent use.
 func (m *MediaEngine) RegisterCodec(codec *RTPCodec) uint8 {
-	// pion/webrtc#43
+	// nolint:godox
+	// TODO: dynamically generate a payload type in the range 96-127 if one wasn't provided.
+	// See https://github.com/pion/webrtc/issues/43
 	m.codecs = append(m.codecs, codec)
 	return codec.PayloadType
 }
 
-// RegisterDefaultCodecs is a helper that registers the default codecs supported by Pion WebRTC
+// RegisterDefaultCodecs registers the default codecs supported by Pion WebRTC.
+// RegisterDefaultCodecs is not safe for concurrent use.
 func (m *MediaEngine) RegisterDefaultCodecs() {
-	// Audio Codecs in order of preference
+	// Audio Codecs in descending order of preference
 	m.RegisterCodec(NewRTPOpusCodec(DefaultPayloadTypeOpus, 48000))
 	m.RegisterCodec(NewRTPPCMUCodec(DefaultPayloadTypePCMU, 8000))
 	m.RegisterCodec(NewRTPPCMACodec(DefaultPayloadTypePCMA, 8000))
 	m.RegisterCodec(NewRTPG722Codec(DefaultPayloadTypeG722, 8000))
 
-	// Video Codecs in order of preference
+	// Video Codecs in descending order of preference
 	m.RegisterCodec(NewRTPVP8Codec(DefaultPayloadTypeVP8, 90000))
 	m.RegisterCodec(NewRTPVP9Codec(DefaultPayloadTypeVP9, 90000))
 	m.RegisterCodec(NewRTPH264Codec(DefaultPayloadTypeH264, 90000))
 }
 
-// PopulateFromSDP finds all codecs in a session description and adds them to a MediaEngine, using dynamic
-// payload types and parameters from the sdp.
+// PopulateFromSDP finds all codecs in sd and adds them to m, using the dynamic
+// payload types and parameters from sd.
+// PopulateFromSDP is intended for use when answering a request.
+// The offerer sets the PayloadTypes for the connection.
+// PopulateFromSDP allows an answerer to properly match the PayloadTypes from the offerer.
+// A MediaEngine populated by PopulateFromSDP should be used only for a single session.
 func (m *MediaEngine) PopulateFromSDP(sd SessionDescription) error {
 	sdp := sdp.SessionDescription{}
 	if err := sdp.Unmarshal([]byte(sd.SDP)); err != nil {
@@ -68,13 +82,13 @@ func (m *MediaEngine) PopulateFromSDP(sd SessionDescription) error {
 		for _, format := range md.MediaName.Formats {
 			pt, err := strconv.Atoi(format)
 			if err != nil {
-				return fmt.Errorf("format parse error")
+				return errMediaEngineParseError
 			}
 
 			payloadType := uint8(pt)
 			payloadCodec, err := sdp.GetCodecForPayloadType(payloadType)
 			if err != nil {
-				return fmt.Errorf("could not find codec for payload type %d", payloadType)
+				return fmt.Errorf("%w: codec for payload type %d", errMediaEngineCodecNotFound, payloadType)
 			}
 
 			var codec *RTPCodec
@@ -105,6 +119,18 @@ func (m *MediaEngine) PopulateFromSDP(sd SessionDescription) error {
 	return nil
 }
 
+// GetCodecsByName returns all codecs by name that are supported by m.
+// The returned codecs should not be modified.
+func (m *MediaEngine) GetCodecsByName(codecName string) []*RTPCodec {
+	var codecs []*RTPCodec
+	for _, codec := range m.codecs {
+		if strings.EqualFold(codec.Name, codecName) {
+			codecs = append(codecs, codec)
+		}
+	}
+	return codecs
+}
+
 func (m *MediaEngine) getCodec(payloadType uint8) (*RTPCodec, error) {
 	for _, codec := range m.codecs {
 		if codec.PayloadType == payloadType {
@@ -116,7 +142,7 @@ func (m *MediaEngine) getCodec(payloadType uint8) (*RTPCodec, error) {
 
 func (m *MediaEngine) getCodecSDP(sdpCodec sdp.Codec) (*RTPCodec, error) {
 	for _, codec := range m.codecs {
-		if codec.Name == sdpCodec.Name &&
+		if strings.EqualFold(codec.Name, sdpCodec.Name) &&
 			codec.ClockRate == sdpCodec.ClockRate &&
 			(sdpCodec.EncodingParameters == "" ||
 				strconv.Itoa(int(codec.Channels)) == sdpCodec.EncodingParameters) &&
@@ -127,7 +153,8 @@ func (m *MediaEngine) getCodecSDP(sdpCodec sdp.Codec) (*RTPCodec, error) {
 	return nil, ErrCodecNotFound
 }
 
-// GetCodecsByKind returns all codecs of a chosen kind in the codecs list
+// GetCodecsByKind returns all codecs of kind kind that are supported by m.
+// The returned codecs should not be modified.
 func (m *MediaEngine) GetCodecsByKind(kind RTPCodecType) []*RTPCodec {
 	var codecs []*RTPCodec
 	for _, codec := range m.codecs {
@@ -190,7 +217,7 @@ func NewRTPOpusCodec(payloadType uint8, clockrate uint32) *RTPCodec {
 	c := NewRTPCodec(RTPCodecTypeAudio,
 		Opus,
 		clockrate,
-		2, //According to RFC7587, Opus RTP streams must have exactly 2 channels.
+		2, // According to RFC7587, Opus RTP streams must have exactly 2 channels.
 		"minptime=10;useinbandfec=1",
 		payloadType,
 		&codecs.OpusPayloader{})
@@ -230,6 +257,19 @@ func NewRTPVP9Codec(payloadType uint8, clockrate uint32) *RTPCodec {
 		0,
 		"",
 		payloadType,
+		&codecs.VP9Payloader{})
+	return c
+}
+
+// NewRTPVP9CodecExt is a helper to create an VP8 codec
+func NewRTPVP9CodecExt(payloadType uint8, clockrate uint32, rtcpfb []RTCPFeedback, fmtp string) *RTPCodec {
+	c := NewRTPCodecExt(RTPCodecTypeVideo,
+		VP9,
+		clockrate,
+		0,
+		fmtp,
+		payloadType,
+		rtcpfb,
 		&codecs.VP9Payloader{})
 	return c
 }
@@ -301,6 +341,7 @@ type RTPCodec struct {
 	Name        string
 	PayloadType uint8
 	Payloader   rtp.Payloader
+	statsID     string
 }
 
 // NewRTPCodec is used to define a new codec
@@ -324,6 +365,7 @@ func NewRTPCodec(
 		Payloader:   payloader,
 		Type:        codecType,
 		Name:        name,
+		statsID:     fmt.Sprintf("RTPCodec-%d", time.Now().UnixNano()),
 	}
 }
 
@@ -371,4 +413,22 @@ type RTPHeaderExtensionCapability struct {
 type RTPCapabilities struct {
 	Codecs           []RTPCodecCapability
 	HeaderExtensions []RTPHeaderExtensionCapability
+}
+
+func (m *MediaEngine) collectStats(collector *statsReportCollector) {
+	for _, codec := range m.codecs {
+		collector.Collecting()
+		stats := CodecStats{
+			Timestamp:   statsTimestampFrom(time.Now()),
+			Type:        StatsTypeCodec,
+			ID:          codec.statsID,
+			PayloadType: codec.PayloadType,
+			MimeType:    codec.MimeType,
+			ClockRate:   codec.ClockRate,
+			Channels:    uint8(codec.Channels),
+			SDPFmtpLine: codec.SDPFmtpLine,
+		}
+
+		collector.Collect(stats.ID, stats)
+	}
 }

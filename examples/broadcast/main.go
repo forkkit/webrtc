@@ -1,21 +1,21 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
 
 	"github.com/pion/rtcp"
-	"github.com/pion/webrtc/v2"
-
-	"github.com/pion/webrtc/v2/examples/internal/signal"
+	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/examples/internal/signal"
 )
 
 const (
 	rtcpPLIInterval = time.Second * 3
 )
 
-func main() {
+func main() { // nolint:gocognit
 	sdpChan := signal.HTTPSDPServer()
 
 	// Everything below is the Pion WebRTC API, thanks for using it ❤️.
@@ -82,7 +82,7 @@ func main() {
 			}
 
 			// ErrClosedPipe means we don't have any subscribers, this is ok if no peers have connected yet
-			if _, err = localTrack.Write(rtpBuf[:i]); err != nil && err != io.ErrClosedPipe {
+			if _, err = localTrack.Write(rtpBuf[:i]); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 				panic(err)
 			}
 		}
@@ -100,14 +100,22 @@ func main() {
 		panic(err)
 	}
 
+	// Create channel that is blocked until ICE Gathering is complete
+	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+
 	// Sets the LocalDescription, and starts our UDP listeners
 	err = peerConnection.SetLocalDescription(answer)
 	if err != nil {
 		panic(err)
 	}
 
+	// Block until ICE Gathering is complete, disabling trickle ICE
+	// we do this because we only can exchange one signaling message
+	// in a production application you should exchange ICE Candidates via OnICECandidate
+	<-gatherComplete
+
 	// Get the LocalDescription and take it to base64 so we can paste in browser
-	fmt.Println(signal.Encode(answer))
+	fmt.Println(signal.Encode(*peerConnection.LocalDescription()))
 
 	localTrack := <-localTrackChan
 	for {
@@ -140,13 +148,21 @@ func main() {
 			panic(err)
 		}
 
+		// Create channel that is blocked until ICE Gathering is complete
+		gatherComplete = webrtc.GatheringCompletePromise(peerConnection)
+
 		// Sets the LocalDescription, and starts our UDP listeners
 		err = peerConnection.SetLocalDescription(answer)
 		if err != nil {
 			panic(err)
 		}
 
+		// Block until ICE Gathering is complete, disabling trickle ICE
+		// we do this because we only can exchange one signaling message
+		// in a production application you should exchange ICE Candidates via OnICECandidate
+		<-gatherComplete
+
 		// Get the LocalDescription and take it to base64 so we can paste in browser
-		fmt.Println(signal.Encode(answer))
+		fmt.Println(signal.Encode(*peerConnection.LocalDescription()))
 	}
 }

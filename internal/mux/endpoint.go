@@ -1,11 +1,12 @@
 package mux
 
 import (
+	"errors"
 	"io"
 	"net"
 	"time"
 
-	"github.com/pion/ice"
+	"github.com/pion/ice/v2"
 	"github.com/pion/transport/packetio"
 )
 
@@ -39,9 +40,9 @@ func (e *Endpoint) Read(p []byte) (int, error) {
 // Write writes len(p) bytes to the underlying conn
 func (e *Endpoint) Write(p []byte) (int, error) {
 	n, err := e.mux.nextConn.Write(p)
-	if err == ice.ErrNoCandidatePairs {
+	if errors.Is(err, ice.ErrNoCandidatePairs) {
 		return 0, nil
-	} else if err == ice.ErrClosed {
+	} else if errors.Is(err, ice.ErrClosed) {
 		return 0, io.ErrClosedPipe
 	}
 
@@ -55,7 +56,7 @@ func (e *Endpoint) LocalAddr() net.Addr {
 
 // RemoteAddr is a stub
 func (e *Endpoint) RemoteAddr() net.Addr {
-	return e.mux.nextConn.LocalAddr()
+	return e.mux.nextConn.RemoteAddr()
 }
 
 // SetDeadline is a stub

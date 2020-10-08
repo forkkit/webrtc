@@ -3,7 +3,7 @@ package ivfwriter
 
 import (
 	"encoding/binary"
-	"fmt"
+	"errors"
 	"io"
 	"os"
 
@@ -11,10 +11,16 @@ import (
 	"github.com/pion/rtp/codecs"
 )
 
+var (
+	errFileNotOpened    = errors.New("file not opened")
+	errInvalidNilPacket = errors.New("invalid nil packet")
+)
+
 // IVFWriter is used to take RTP packets and write them to an IVF on disk
 type IVFWriter struct {
 	ioWriter     io.Writer
 	count        uint64
+	seenKeyFrame bool
 	currentFrame []byte
 }
 
@@ -35,11 +41,12 @@ func New(fileName string) (*IVFWriter, error) {
 // NewWith initialize a new IVF writer with an io.Writer output
 func NewWith(out io.Writer) (*IVFWriter, error) {
 	if out == nil {
-		return nil, fmt.Errorf("file not opened")
+		return nil, errFileNotOpened
 	}
 
 	writer := &IVFWriter{
-		ioWriter: out,
+		ioWriter:     out,
+		seenKeyFrame: false,
 	}
 	if err := writer.writeHeader(); err != nil {
 		return nil, err
@@ -49,10 +56,10 @@ func NewWith(out io.Writer) (*IVFWriter, error) {
 
 func (i *IVFWriter) writeHeader() error {
 	header := make([]byte, 32)
-	copy(header[0:], []byte("DKIF"))                // DKIF
+	copy(header[0:], "DKIF")                        // DKIF
 	binary.LittleEndian.PutUint16(header[4:], 0)    // Version
 	binary.LittleEndian.PutUint16(header[6:], 32)   // Header size
-	copy(header[8:], []byte("VP80"))                // FOURCC
+	copy(header[8:], "VP80")                        // FOURCC
 	binary.LittleEndian.PutUint16(header[12:], 640) // Width in pixels
 	binary.LittleEndian.PutUint16(header[14:], 480) // Height in pixels
 	binary.LittleEndian.PutUint32(header[16:], 30)  // Framerate denominator
@@ -67,7 +74,7 @@ func (i *IVFWriter) writeHeader() error {
 // WriteRTP adds a new packet and writes the appropriate headers for it
 func (i *IVFWriter) WriteRTP(packet *rtp.Packet) error {
 	if i.ioWriter == nil {
-		return fmt.Errorf("file not opened")
+		return errFileNotOpened
 	}
 
 	vp8Packet := codecs.VP8Packet{}
@@ -75,6 +82,15 @@ func (i *IVFWriter) WriteRTP(packet *rtp.Packet) error {
 		return err
 	}
 
+	isKeyFrame := vp8Packet.Payload[0] & 0x01
+	switch {
+	case !i.seenKeyFrame && isKeyFrame == 1:
+		return nil
+	case i.currentFrame == nil && vp8Packet.S != 1:
+		return nil
+	}
+
+	i.seenKeyFrame = true
 	i.currentFrame = append(i.currentFrame, vp8Packet.Payload[0:]...)
 
 	if !packet.Marker {

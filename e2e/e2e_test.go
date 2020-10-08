@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"os"
 	"strconv"
 	"strings"
@@ -16,8 +15,9 @@ import (
 
 	"github.com/sclevine/agouti"
 
-	"github.com/pion/webrtc/v2"
-	"github.com/pion/webrtc/v2/pkg/media"
+	"github.com/pion/randutil"
+	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media"
 )
 
 var silentOpusFrame = []byte{0xf8, 0xff, 0xfe} // 20ms, 8kHz, mono
@@ -351,7 +351,7 @@ func createTrack(offer webrtc.SessionDescription) (*webrtc.PeerConnection, *webr
 		return nil, nil, nil, errPc
 	}
 
-	track, errTrack := pc.NewTrack(payloadType, rand.Uint32(), "video", "pion")
+	track, errTrack := pc.NewTrack(payloadType, randutil.NewMathRandomGenerator().Uint32(), "video", "pion")
 	if errTrack != nil {
 		return nil, nil, nil, errTrack
 	}

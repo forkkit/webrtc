@@ -3,12 +3,12 @@
 package webrtc
 
 import (
-	"fmt"
 	"io"
 	"sync"
 
 	"github.com/pion/rtp"
-	"github.com/pion/webrtc/v2/pkg/media"
+	"github.com/pion/webrtc/v3/internal/util"
+	"github.com/pion/webrtc/v3/pkg/media"
 )
 
 const (
@@ -27,12 +27,14 @@ type Track struct {
 	label       string
 	ssrc        uint32
 	codec       *RTPCodec
+	rid         string
 
 	packetizer rtp.Packetizer
 
 	receiver         *RTPReceiver
 	activeSenders    []*RTPSender
 	totalSenderCount int // count of all senders (accounts for senders that have not been started yet)
+	peeked           []byte
 }
 
 // ID gets the ID of the track
@@ -40,6 +42,16 @@ func (t *Track) ID() string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.id
+}
+
+// RID gets the RTP Stream ID of this Track
+// With Simulcast you will have multiple tracks with the same ID, but different RID values.
+// In many cases a Track will not have an RID, so it is important to assert it is non-zero
+func (t *Track) RID() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	return t.rid
 }
 
 // PayloadType gets the PayloadType of the track
@@ -70,6 +82,11 @@ func (t *Track) SSRC() uint32 {
 	return t.ssrc
 }
 
+// Msid gets the Msid of the track
+func (t *Track) Msid() string {
+	return t.Label() + " " + t.ID()
+}
+
 // Codec gets the Codec of the track
 func (t *Track) Codec() *RTPCodec {
 	t.mu.RLock()
@@ -87,14 +104,47 @@ func (t *Track) Packetizer() rtp.Packetizer {
 // Read reads data from the track. If this is a local track this will error
 func (t *Track) Read(b []byte) (n int, err error) {
 	t.mu.RLock()
-	if len(t.activeSenders) != 0 {
-		t.mu.RUnlock()
-		return 0, fmt.Errorf("this is a local track and must not be read from")
-	}
 	r := t.receiver
+
+	if t.totalSenderCount != 0 || r == nil {
+		t.mu.RUnlock()
+		return 0, errTrackLocalTrackRead
+	}
+	peeked := t.peeked != nil
 	t.mu.RUnlock()
 
-	return r.readRTP(b)
+	if peeked {
+		t.mu.Lock()
+		data := t.peeked
+		t.peeked = nil
+		t.mu.Unlock()
+		// someone else may have stolen our packet when we
+		// released the lock.  Deal with it.
+		if data != nil {
+			n = copy(b, data)
+			return
+		}
+	}
+
+	return r.readRTP(b, t)
+}
+
+// peek is like Read, but it doesn't discard the packet read
+func (t *Track) peek(b []byte) (n int, err error) {
+	n, err = t.Read(b)
+	if err != nil {
+		return
+	}
+
+	t.mu.Lock()
+	// this might overwrite data if somebody peeked between the Read
+	// and us getting the lock.  Oh well, we'll just drop a packet in
+	// that case.
+	data := make([]byte, n)
+	n = copy(data, b[:n])
+	t.peeked = data
+	t.mu.Unlock()
+	return
 }
 
 // ReadRTP is a convenience method that wraps Read and unmarshals for you
@@ -146,7 +196,7 @@ func (t *Track) WriteRTP(p *rtp.Packet) error {
 	t.mu.RLock()
 	if t.receiver != nil {
 		t.mu.RUnlock()
-		return fmt.Errorf("this is a remote track and must not be written to")
+		return errTrackLocalTrackWrite
 	}
 	senders := t.activeSenders
 	totalSenderCount := t.totalSenderCount
@@ -156,20 +206,20 @@ func (t *Track) WriteRTP(p *rtp.Packet) error {
 		return io.ErrClosedPipe
 	}
 
+	writeErrs := []error{}
 	for _, s := range senders {
-		_, err := s.sendRTP(&p.Header, p.Payload)
-		if err != nil {
-			return err
+		if _, err := s.SendRTP(&p.Header, p.Payload); err != nil {
+			writeErrs = append(writeErrs, err)
 		}
 	}
 
-	return nil
+	return util.FlattenErrs(writeErrs)
 }
 
 // NewTrack initializes a new *Track
 func NewTrack(payloadType uint8, ssrc uint32, id, label string, codec *RTPCodec) (*Track, error) {
 	if ssrc == 0 {
-		return nil, fmt.Errorf("SSRC supplied to NewTrack() must be non-zero")
+		return nil, errTrackSSRCNewTrackZero
 	}
 
 	packetizer := rtp.NewPacketizer(
@@ -195,8 +245,13 @@ func NewTrack(payloadType uint8, ssrc uint32, id, label string, codec *RTPCodec)
 // determinePayloadType blocks and reads a single packet to determine the PayloadType for this Track
 // this is useful if we are dealing with a remote track and we can't announce it to the user until we know the payloadType
 func (t *Track) determinePayloadType() error {
-	r, err := t.ReadRTP()
+	b := make([]byte, receiveMTU)
+	n, err := t.peek(b)
 	if err != nil {
+		return err
+	}
+	r := rtp.Packet{}
+	if err := r.Unmarshal(b[:n]); err != nil {
 		return err
 	}
 

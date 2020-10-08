@@ -16,8 +16,8 @@ import (
 	"github.com/pion/dtls/v2/pkg/crypto/fingerprint"
 	"github.com/pion/logging"
 	"github.com/pion/quic"
-	"github.com/pion/webrtc/v2/internal/mux"
-	"github.com/pion/webrtc/v2/pkg/rtcerr"
+	"github.com/pion/webrtc/v3/internal/mux"
+	"github.com/pion/webrtc/v3/pkg/rtcerr"
 )
 
 // QUICTransport is a specialization of QuicTransportBase focused on
@@ -31,8 +31,14 @@ type QUICTransport struct {
 	certificates []Certificate
 
 	api *API
-	log logging.LeveledLogger
+
+	loggingFactory logging.LoggerFactory
 }
+
+var (
+	errQuicTransportFingerprintNoMatch      = errors.New("no matching fingerprint")
+	errQuicTransportICEConnectionNotStarted = errors.New("ICE connection not started")
+)
 
 // NewQUICTransport creates a new QUICTransport.
 // This constructor is part of the ORTC API. It is not
@@ -42,9 +48,9 @@ type QUICTransport struct {
 // any browsers yet.
 func (api *API) NewQUICTransport(transport *ICETransport, certificates []Certificate) (*QUICTransport, error) {
 	t := &QUICTransport{
-		iceTransport: transport,
-		api:          api,
-		log:          api.settingEngine.LoggerFactory.NewLogger("quic"),
+		iceTransport:   transport,
+		api:            api,
+		loggingFactory: api.settingEngine.LoggerFactory,
 	}
 
 	if len(certificates) > 0 {
@@ -97,7 +103,6 @@ func (t *QUICTransport) Start(remoteParameters QUICParameters) error {
 		return err
 	}
 
-	// pion/webrtc#753
 	cert := t.certificates[0]
 
 	isClient := true
@@ -111,11 +116,11 @@ func (t *QUICTransport) Start(remoteParameters QUICParameters) error {
 			isClient = false
 		}
 	}
-
 	cfg := &quic.Config{
-		Client:      isClient,
-		Certificate: cert.x509Cert,
-		PrivateKey:  cert.privateKey,
+		Client:        isClient,
+		Certificate:   cert.x509Cert,
+		PrivateKey:    cert.privateKey,
+		LoggerFactory: t.loggingFactory,
 	}
 	endpoint := t.iceTransport.NewEndpoint(mux.MatchAll)
 	err := t.TransportBase.StartBase(endpoint, cfg)
@@ -131,7 +136,8 @@ func (t *QUICTransport) Start(remoteParameters QUICParameters) error {
 			return err
 		}
 	} else {
-		t.log.Errorf("Warning: Certificate not checked")
+		log := t.loggingFactory.NewLogger("quic-go")
+		log.Errorf("Warning: Certificate not checked")
 	}
 
 	return nil
@@ -154,13 +160,13 @@ func (t *QUICTransport) validateFingerPrint(remoteParameters QUICParameters, rem
 		}
 	}
 
-	return errors.New("no matching fingerprint")
+	return errQuicTransportFingerprintNoMatch
 }
 
 func (t *QUICTransport) ensureICEConn() error {
 	if t.iceTransport == nil ||
 		t.iceTransport.State() == ICETransportStateNew {
-		return errors.New("ICE connection not started")
+		return errQuicTransportICEConnectionNotStarted
 	}
 
 	return nil
